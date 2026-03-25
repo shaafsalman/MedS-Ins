@@ -1,0 +1,52 @@
+# Dataset downloads
+MedS-Bench-data/
+MedS-Ins-data/
+
+# Eval outputs
+Evaluation/prediction_results/
+examples/*.csv
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Env
+.env
+.venv
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+nohup.out
+
+# Model weights / checkpoints
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+checkpoints/
+outputs/
+
+# HuggingFace cache
+.cache/
