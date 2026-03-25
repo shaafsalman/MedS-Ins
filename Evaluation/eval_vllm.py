@@ -24,6 +24,8 @@ parser.add_argument("--top_k", type=int, default=20)
 parser.add_argument("--enable_thinking", action="store_true", default=True)
 parser.add_argument("--no_thinking", dest="enable_thinking", action="store_false")
 parser.add_argument("--thinking_budget", type=int, default=8192)
+parser.add_argument("--repetition_penalty", type=float, default=1.0)
+parser.add_argument("--min_p", type=float, default=0.0)
 parser.add_argument("--workers", type=int, default=32)
 args = parser.parse_args()
 
@@ -50,7 +52,9 @@ if is_ner:
         "\n2. If the sentence contains no relevant entity, output exactly: There is no related entity."
         "\n3. Do not hallucinate entities. Only extract what is explicitly present in the input text."
         "\n4. Do not include proteins, genes, or non-chemical biological terms unless they are also chemical compounds."
-        "\nAfter your reasoning, you must end your response with exactly:\nAnswer: <comma-separated entity names as they appear in the text, or 'There is no related entity.' if none>"
+        "\n5. Do not explain your reasoning. Do not write any sentences. Output only the final answer line."
+        "\n6. Your entire response after thinking must be one single line starting with 'Answer:' and nothing else."
+        "\nAnswer: <comma-separated entity names as they appear in the text, or 'There is no related entity.' if none>"
     )
 else:
     format_instruction = "\nAfter your reasoning, you must end your response with exactly:\nAnswer: <answer>"
@@ -71,6 +75,8 @@ print(f"Top-k:            {args.top_k}")
 print(f"Presence penalty: {args.presence_penalty}")
 print(f"Thinking:         {args.enable_thinking}")
 print(f"Thinking budget:  {args.thinking_budget}")
+print(f"Repetition pen.:  {args.repetition_penalty}")
+print(f"Min-p:            {args.min_p}")
 print(f"Workers:          {args.workers}")
 print(f"Prompt preview:   {system_prompt[:300]}\n")
 print("-" * 60)
@@ -79,6 +85,8 @@ print("-" * 60)
 def parse_answer(raw: str) -> str:
     if "</think>" in raw:
         raw = raw.split("</think>")[-1].strip()
+    if raw.count("!") > 10 or raw.count("?") > 10:
+        return "PARSE_ERROR: repetition loop detected"
     match = re.search(r"Answer:\s*(.+)", raw, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1).strip().rstrip(".")
@@ -117,8 +125,9 @@ def run_instance(inst, idx):
     user_msg = f"Input:\n{inst['input']}\nOutput:"
     gt_raw = inst["output"] if isinstance(inst["output"], str) else inst["output"][0]
 
-    extra = {"top_k": args.top_k, "chat_template_kwargs": {"enable_thinking": args.enable_thinking}}
-    if args.enable_thinking:
+    effective_thinking = args.enable_thinking and not is_ner
+    extra = {"top_k": args.top_k, "chat_template_kwargs": {"enable_thinking": effective_thinking}}
+    if effective_thinking:
         extra["thinking"] = {"type": "enabled", "budget_tokens": args.thinking_budget}
 
     try:
@@ -132,15 +141,20 @@ def run_instance(inst, idx):
             top_p=args.top_p,
             presence_penalty=args.presence_penalty,
             max_tokens=args.max_tokens,
-            extra_body=extra
+            extra_body={**extra, "repetition_penalty": args.repetition_penalty, "min_p": args.min_p},
         )
-        raw = resp.choices[0].message.content.strip()
-        pred_text = parse_answer(raw)
+        content = resp.choices[0].message.content
+        if content is None:
+            raw = pred_text = "ERROR: model returned null content (thinking consumed all tokens)"
+        else:
+            raw = content.strip()
+            pred_text = parse_answer(raw)
     except Exception as e:
         raw = pred_text = f"ERROR: {e}"
 
     result = {
         "idx": idx,
+        "row": idx + 1,
         "task_id": inst.get("id", idx),
         "input": inst["input"][:200],
         "gt": gt_raw,
@@ -170,22 +184,22 @@ with ThreadPoolExecutor(max_workers=args.workers) as executor:
             r = future.result()
             results[r["idx"]] = r
             if is_ner:
-                tqdm.tqdm.write(f"[F1={r['f1']:.2f}] Prediction: {r['pred'][:60]!r}  |  Expected: {r['gt'][:60]!r}")
+                tqdm.tqdm.write(f"[row={r['row']}][F1={r['f1']:.2f}] Prediction: {r['pred'][:60]!r}  |  Expected: {r['gt'][:60]!r}")
             else:
                 status = "✓" if r["correct"] else "✗"
-                tqdm.tqdm.write(f"[{status}] Prediction: {r['pred'][:80]!r}  |  Expected: {r['gt_norm'][:80]!r}")
+                tqdm.tqdm.write(f"[row={r['row']}][{status}] Prediction: {r['pred'][:80]!r}  |  Expected: {r['gt_norm'][:80]!r}")
             pbar.update(1)
 
 with open(SAVE_PATH, "w", newline="") as f:
     writer = csv.writer(f)
     if is_ner:
-        writer.writerow(["task_id", "input", "GT", "raw_output", "parsed_output", "precision", "recall", "f1"])
+        writer.writerow(["row", "task_id", "input", "GT", "raw_output", "parsed_output", "precision", "recall", "f1"])
         for r in results:
-            writer.writerow([r["task_id"], r["input"], r["gt"], r["raw"], r["pred"], f"{r['precision']:.4f}", f"{r['recall']:.4f}", f"{r['f1']:.4f}"])
+            writer.writerow([r["row"], r["task_id"], r["input"], r["gt"], r["raw"], r["pred"], f"{r['precision']:.4f}", f"{r['recall']:.4f}", f"{r['f1']:.4f}"])
     else:
-        writer.writerow(["task_id", "input", "GT", "raw_output", "parsed_output", "correct"])
+        writer.writerow(["row", "task_id", "input", "GT", "raw_output", "parsed_output", "correct"])
         for r in results:
-            writer.writerow([r["task_id"], r["input"], r["gt_norm"], r["raw"], r["pred"], r["correct"]])
+            writer.writerow([r["row"], r["task_id"], r["input"], r["gt_norm"], r["raw"], r["pred"], r["correct"]])
 
 print(f"\n{'='*40}")
 print(f"Task: {args.benchmark_task}")
